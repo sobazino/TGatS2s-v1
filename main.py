@@ -11,7 +11,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import Set2Set
 from torch_geometric.data import Dataset
-from torch_geometric.nn import TransformerConv
 import typing
 from typing import Optional, Tuple, Union
 from torch import Tensor
@@ -281,9 +280,9 @@ class NGATConv(MessagePassing):
         return (f'{self.__class__.__name__}({self.in_channels}, '
                 f'{self.out_channels}, heads={self.heads})')
             
-class GRAPH1(nn.Module):
+class GRAPH(nn.Module):
     def __init__(self, dropout):
-        super(GRAPH1, self).__init__()
+        super(GRAPH, self).__init__()
         self.feature_encoder = nn.Sequential(
             nn.Linear(6, 128),
             nn.LayerNorm(128),
@@ -300,35 +299,19 @@ class GRAPH1(nn.Module):
     def forward(self, x, edge_index, edge_attr, batch):
         x = self.feature_encoder(x)
         x = self.dropout(x)
+        
         x_gat = self.gat1(x, edge_index, edge_attr)
         x_gat = F.leaky_relu(x_gat, 0.1)
         x_gat = self.dropout(x_gat)
+        
         x_gat = self.gat2(x_gat, edge_index, edge_attr)
         x_gat = F.elu(x_gat)
         x_gat = self.dropout(x_gat)
+        
         x_gat = self.gat3(x_gat, edge_index, edge_attr)
         x = self.pool(x_gat, batch)
         return x
-
-class GRAPH2(nn.Module):
-    def __init__(self, dropout):
-        super(GRAPH2, self).__init__()
-        self.convs = nn.ModuleList([
-            TransformerConv(in_channels=6 if i == 0 else 64, out_channels=64)
-            for i in range(12)
-        ])
-        self.pool = Set2Set(64, processing_steps=5)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x, edge_index, edge_attr, batch):
-        for conv in self.convs:
-            x = conv(x, edge_index)
-            x = F.leaky_relu(x, 0.1)
-            x = self.dropout(x)
-            
-        x = self.pool(x, batch)
-        return x
-            
+        
 class DTIV7(nn.Sequential):
     def __init__(self, **params):
         super(DTIV7, self).__init__()
@@ -336,8 +319,8 @@ class DTIV7(nn.Sequential):
         self.dropout = params['dropout']
         self.Gsize = params['gsize']
 
-        self.GRAPH1 = GRAPH1(self.dropout)
-        self.GRAPH2 = GRAPH1(self.dropout)
+        self.GRAPH1 = GRAPH(self.dropout)
+        self.GRAPH2 = GRAPH(self.dropout)
         self.AM = MLP(128, self.Gsize, self.dropout)
         self.BM = MLP(128, self.Gsize, self.dropout)
         
@@ -356,15 +339,12 @@ class DTIV7(nn.Sequential):
         self.TBlock = Block(self.layer, self.size, self.isize, self.head, self.dropout)
         
         self.Cnn = nn.Conv2d(1, 3, 3, padding=0)
-        # self.Cnn3D = nn.Conv2d(1, 3, 3, padding=0)
         self.sizeout = 3*(self.sizeD-2)*(self.sizeT-2)+(self.Gsize*2)
-        
-        # self.sizeout = 3*(self.sizeD-2)*(self.sizeT-2)+3*(self.Gsize-2)*(self.Gsize-2)
         self.Out = nn.Sequential(
-            nn.Linear(self.sizeout, 256),
+            nn.Linear(self.sizeout, 512),
             nn.ReLU(True),
-            nn.BatchNorm1d(256),
-            nn.Linear(256, 64),
+            nn.BatchNorm1d(512),
+            nn.Linear(512, 64),
             nn.ReLU(True),
             nn.BatchNorm1d(64),
             nn.Linear(64, 32),
@@ -377,22 +357,11 @@ class DTIV7(nn.Sequential):
         A = self.AM(self.GRAPH1(D3D.x, D3D.edge_index, D3D.edge_attr, D3D.batch))
         B = self.BM(self.GRAPH2(T3D.x, T3D.edge_index, T3D.edge_attr, T3D.batch))
         
-        # A = A.unsqueeze(1)
-        # B = B.unsqueeze(1)
-        # A = torch.unsqueeze(A , 2).repeat(1, self.Gsize, self.Gsize, 1)
-        # B = torch.unsqueeze(B, 1).repeat(1, self.Gsize, self.Gsize, 1)
-        # AB = A * B
-        # Y = AB.view(int(self.batch_size), -1, self.Gsize, self.Gsize) 
-        # Y = torch.sum(Y, dim = 1)
-        # Y = torch.unsqueeze(Y, 1)
-        # Y = F.dropout(Y, p=self.dropout)
-        # Y = self.Cnn3D(Y)
-        # Y = Y.view(int(self.batch_size), -1)
-        
         ED = self.DEmbedding(DV).float()
         ET = self.TEmbedding(TV).float()
         Dencoded = self.DBlock(ED)
         Tencoded = self.TBlock(ET)
+        
         D = torch.unsqueeze(Dencoded, 2).repeat(1, 1, self.sizeT, 1)
         T = torch.unsqueeze(Tencoded, 1).repeat(1, self.sizeD, 1, 1)
         DT = D * T
@@ -403,8 +372,6 @@ class DTIV7(nn.Sequential):
         O = self.Cnn(O)
         O = O.view(int(self.batch_size), -1)
         O = torch.cat([O, A, B], dim=-1)
-        # O = torch.cat([O, Y], dim=-1)
-        
         O = self.Out(O)
         return self.sigmoid(O).squeeze()
 
@@ -527,7 +494,7 @@ def GET(i, DF, DFNEW):
         if os.path.exists(PID) and os.path.exists(DID):
             DFNEW = pd.concat([DFNEW, DF.iloc[[i]]], ignore_index=True)
         return DFNEW
-
+    
 class KDataSet(Dataset):
     def __init__(self, data):
         self.data = data
@@ -752,12 +719,11 @@ def start():
     params['dimD'] = 73
     params['dimT'] = 73
     
-    params['gsize'] = 1000
-    # params['gsize'] = 70
+    params['gsize'] = 20
     params['sizeD'] = 50
     params['sizeT'] = 545
     params['isize'] = 1536
-    params['size'] = 192
+    params['size'] = 384
     params['head'] = 12
     params['layer'] = 2
     params['dropout'] = 0.1

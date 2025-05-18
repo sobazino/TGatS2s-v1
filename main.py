@@ -284,7 +284,7 @@ class GRAPH(nn.Module):
     def __init__(self, dropout):
         super(GRAPH, self).__init__()
         self.feature_encoder = nn.Sequential(
-            nn.Linear(6, 128),
+            nn.Linear(7, 128),
             nn.LayerNorm(128),
             nn.LeakyReLU(0.1),
             nn.Dropout(dropout),
